@@ -1,172 +1,83 @@
 
 # CoFilter.jl
+
 [中文文档](readme_cn.md)
 
+**Pure Julia collaborative filtering, built around sparse matrices and multiple dispatch.**
 
-**A flexible, high-performance collaborative filtering module in pure Julia, built on multiple dispatch and a relational modular architecture.**
+## What CoFilter does
 
-## Features
+Given a user-item interaction matrix, CoFilter builds similarity graphs and produces Top-N recommendations. It supports user-based CF, item-based CF, and hybrid fusion — all sharing the same underlying sparse matrix infrastructure, with no Python dependencies.
 
-- **Relation Abstraction**: User-item interactions and similarity graphs are unified as "relation" types.
-- **Algorithms as Types**: Every similarity metric and recommendation strategy is a concrete Julia type.
-- **Multiple Dispatch Driven**: Zero runtime overhead for strategy selection.
-- **High Performance**: Operates directly on sparse matrices with BLAS3-accelerated multiplications.
-- **Incremental Updates**: Hot-update support for new interaction data without full retraining.
-- **Offline Evaluation**: Built-in Precision, Recall, NDCG, and Hit Rate metrics.
+## Design choices
 
-## Architecture
+- **Directly on `SparseMatrixCSC`**. Similarity computation calls BLAS3 on the native sparse format. No conversion to dense, no copies. See `src/similarity/computation.jl`.
+- **Algorithms as concrete types**. `UserBasedRecommender`, `ItemBasedRecommender`, and `HybridRecommender` are distinct types. Dispatch selects the right code path at compile time — no runtime `if` chains.
+- **Builders separate metric from strategy**. A `Builder` pairs a similarity metric (Cosine, Pearson, Jaccard, AdjustedCosine) with a pruning strategy (TopK, threshold). This means any metric can be combined with any pruning without changing recommendation logic. See `src/similarity/builders.jl`.
+- **Incremental update touches only affected rows**. New interactions don't trigger full recomputation. See `src/system/update.jl`.
+- **Cached neighbor lookups**. `SimilarityGraph` has an optional `CachedSimilarityGraph` variant that stores neighbor lists after first access. See `src/graph/cache.jl`.
 
-```
-Data Layer (Relations) → Computation Layer (Builders) → Strategy Layer (Recommenders) → Top-N Results
-```
-
-The module is organized into a clean, layered structure that separates concerns and maximizes extensibility:
-
-```
-src/
-├── CoFilter.jl                  # Module entry point
-├── core/                        # Core types & abstractions
-│   ├── interfaces.jl
-│   ├── types.jl
-│   └── relations.jl
-├── similarity/                  # Similarity computation
-│   ├── metrics.jl               #   Cosine, Pearson, Jaccard, AdjustedCosine
-│   ├── pruning.jl               #   TopK, MinSimilarityThreshold
-│   ├── computation.jl           #   Core computation kernels
-│   ├── builders.jl              #   Builder pattern for assembling pipelines
-│   └── distributed.jl           #   Multi-worker distributed computation
-├── recommenders/                # Recommendation engines
-│   ├── base.jl
-│   ├── user_based.jl
-│   ├── item_based.jl
-│   ├── fusion.jl                #   WeightedSum & RoundRobin strategies
-│   └── hybrid.jl
-├── graph/                       # Similarity graph representation
-│   ├── similarity_graph.jl
-│   └── cache.jl                 #   Transparent neighbor caching
-├── system/                      # System assembly & lifecycle
-│   ├── recommendation_system.jl
-│   ├── training.jl              #   Full training
-│   └── update.jl                #   Incremental online updates
-├── evaluation/                  # Offline evaluation suite
-│   ├── splitting.jl             #   Train/test split strategies
-│   ├── metrics.jl               #   Precision, Recall, NDCG, Hit Rate
-│   └── cross_validation.jl
-└── utils/                       # Utilities
-    ├── sparse_utils.jl
-    ├── cold_start.jl            #   Fallback strategies for new users/items
-    └── validation.jl
-```
-
-This modular design allows you to swap similarity metrics, pruning strategies, and recommendation engines independently, or combine them into hybrid systems.
-
-## Quick Start
-
-### Installation
-
-The package is not yet registered. Install directly from GitHub:
-
-```julia
-using Pkg
-Pkg.add(url="https://github.com/VaneBlien/CoFilter.jl")
-```
-
-Or clone and load via local path:
-
-```julia
-using Pkg
-Pkg.develop(path="path/to/CoFilter.jl")
-```
-
-### Basic Usage
+## Quick start
 
 ```julia
 using CoFilter, SparseArrays
 
-# 1. Prepare data: 100 users, 200 items, 5% density
-n_users, n_items = 100, 200
-matrix = sprand(n_users, n_items, 0.05)
-direct_rel = DirectRelation(matrix, collect(1:n_users), collect(1:n_items), :rating)
+# 100 users, 200 items, 5% density
+matrix = sprand(100, 200, 0.05)
+direct_rel = DirectRelation(matrix, collect(1:100), collect(1:200), :rating)
 
-# 2. Configure an item-based CF system
+# Item-based CF with cosine similarity, top-30 neighbors
 builder = ItemSimilarityBuilder(CosineSimilarity(), TopKNeighbors(30))
 sys = RecommendationSystem(direct_rel, Dict(:item_sim => builder), ItemBasedRecommender())
 
-# 3. Train
 train!(sys)
-
-# 4. Get top-10 recommendations for user 1
 top10 = recommend(sys, 1, 10)
-println("Recommendations for user 1: $top10")
 ```
 
-### Offline Evaluation
+## Supported algorithms
 
-```julia
-# Split data
-train_rel, test_pairs = train_test_split(direct_rel, 0.2)
+| Type | Constructor |
+|------|-------------|
+| User-Based CF | `UserBasedRecommender()` |
+| Item-Based CF | `ItemBasedRecommender()` |
+| Weighted Hybrid | `HybridRecommender(engines, WeightedSum(weights))` |
+| Round-Robin Hybrid | `HybridRecommender(engines, RoundRobin())` |
 
-# Evaluate with a factory closure
-metrics = evaluate(() -> begin
-    sys = RecommendationSystem(train_rel, Dict(:item_sim => builder), engine)
-    train!(sys)
-    return sys
-end, test_pairs, 10)
+## Similarity metrics
 
-println("Precision@10: $(metrics.precision)")
-println("Recall@10:    $(metrics.recall)")
-println("NDCG@10:      $(metrics.ndcg)")
-```
+`CosineSimilarity()`, `PearsonSimilarity()`, `JaccardSimilarity()`, `AdjustedCosineSimilarity(damping_factor)`
 
-### MovieLens Demo
+## Pruning strategies
 
-A full end-to-end example on the built-in MovieLens 100K dataset:
+`TopKNeighbors(k)`, `MinSimilarityThreshold(t)`
 
-```julia
-include("examples/movielens_demo.jl")
-```
+## Evaluation metrics
 
-## Supported Algorithms
-
-| Category | Algorithm | Type |
-|----------|-----------|------|
-| Collaborative Filtering | User-Based CF | `UserBasedRecommender` |
-| Collaborative Filtering | Item-Based CF | `ItemBasedRecommender` |
-| Hybrid | Weighted Fusion | `HybridRecommender` + `WeightedSum` |
-| Hybrid | Round-Robin Fusion | `HybridRecommender` + `RoundRobin` |
-
-## Similarity Metrics
-
-- `CosineSimilarity` — Cosine similarity
-- `PearsonSimilarity` — Pearson correlation coefficient
-- `JaccardSimilarity` — Jaccard index
-- `AdjustedCosineSimilarity` — Adjusted cosine with configurable damping
-
-## Pruning Strategies
-
-- `TopKNeighbors(k)` — Keep only the `k` nearest neighbors
-- `MinSimilarityThreshold(t)` — Keep neighbors with similarity ≥ `t`
-
-## Evaluation Metrics
-
-- Precision@K
-- Recall@K
-- NDCG@K
-- Hit Rate@K
+Precision@K, Recall@K, NDCG@K, Hit Rate@K — see `src/evaluation/metrics.jl`
 
 ## Testing
-
-Run the full test suite (225 tests across all modules):
 
 ```julia
 using Pkg
 Pkg.test("CoFilter")
 ```
 
-## Roadmap
+225 tests across all modules.
 
-See [ROADMAP.md](ROADMAP.md) for planned algorithm extensions, performance optimizations, and engineering improvements.
+## Source layout
+
+```
+src/
+├── CoFilter.jl
+├── core/           # AbstractRelation, DirectRelation, interfaces
+├── similarity/     # Metrics, pruning, computation, builders, distributed
+├── recommenders/   # User-based, item-based, hybrid, fusion strategies
+├── graph/          # SimilarityGraph, CachedSimilarityGraph
+├── system/         # RecommendationSystem, training, incremental update
+├── evaluation/     # Train/test split, metrics, cross-validation
+└── utils/          # Sparse utilities, cold-start fallbacks
+```
 
 ## License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+MIT

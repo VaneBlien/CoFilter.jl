@@ -1,153 +1,170 @@
 
 # CoFilter.jl
 
-**CoFilter** 是一个纯 Julia 实现的协同过滤推荐算法模块，基于**多重分派**和**关系模块化**架构设计。
+**A flexible, high-performance collaborative filtering module in pure Julia, built on multiple dispatch and a relational modular architecture.**
 
-## 特性
+## Features
 
-- 关系抽象：用户-物品交互、相似度图统一为"关系"类型
-- 算法即类型：每种相似度度量和推荐策略都是具体类型
-- 多重分派驱动：零运行时开销的策略选择
-- 高性能：直接操作稀疏矩阵，利用 BLAS3 矩阵乘法加速
-- 增量更新：支持新交互数据的热更新
-- 离线评估：Precision、Recall、NDCG、Hit Rate 全套指标
+- **Relation Abstraction**: User-item interactions and similarity graphs are unified as "relation" types.
+- **Algorithms as Types**: Every similarity metric and recommendation strategy is a concrete Julia type.
+- **Multiple Dispatch Driven**: Zero runtime overhead for strategy selection.
+- **High Performance**: Operates directly on sparse matrices with BLAS3-accelerated multiplications.
+- **Incremental Updates**: Hot-update support for new interaction data without full retraining.
+- **Offline Evaluation**: Built-in Precision, Recall, NDCG, and Hit Rate metrics.
 
-## 架构
+## Architecture
 
 ```
-数据层 (Relations) → 计算层 (Builders) → 策略层 (Recommenders) → 推荐结果
+Data Layer (Relations) → Computation Layer (Builders) → Strategy Layer (Recommenders) → Top-N Results
 ```
 
-## 快速开始
+The module is organized into a clean, layered structure that separates concerns and maximizes extensibility:
 
-### 安装
+```
+src/
+├── CoFilter.jl                  # Module entry point
+├── core/                        # Core types & abstractions
+│   ├── interfaces.jl
+│   ├── types.jl
+│   └── relations.jl
+├── similarity/                  # Similarity computation
+│   ├── metrics.jl               #   Cosine, Pearson, Jaccard, AdjustedCosine
+│   ├── pruning.jl               #   TopK, MinSimilarityThreshold
+│   ├── computation.jl           #   Core computation kernels
+│   ├── builders.jl              #   Builder pattern for assembling pipelines
+│   └── distributed.jl           #   Multi-worker distributed computation
+├── recommenders/                # Recommendation engines
+│   ├── base.jl
+│   ├── user_based.jl
+│   ├── item_based.jl
+│   ├── fusion.jl                #   WeightedSum & RoundRobin strategies
+│   └── hybrid.jl
+├── graph/                       # Similarity graph representation
+│   ├── similarity_graph.jl
+│   └── cache.jl                 #   Transparent neighbor caching
+├── system/                      # System assembly & lifecycle
+│   ├── recommendation_system.jl
+│   ├── training.jl              #   Full training
+│   └── update.jl                #   Incremental online updates
+├── evaluation/                  # Offline evaluation suite
+│   ├── splitting.jl             #   Train/test split strategies
+│   ├── metrics.jl               #   Precision, Recall, NDCG, Hit Rate
+│   └── cross_validation.jl
+└── utils/                       # Utilities
+    ├── sparse_utils.jl
+    ├── cold_start.jl            #   Fallback strategies for new users/items
+    └── validation.jl
+```
 
-由于包尚未注册，请通过本地路径安装：
+This modular design allows you to swap similarity metrics, pruning strategies, and recommendation engines independently, or combine them into hybrid systems.
+
+## Quick Start
+
+### Installation
+
+The package is not yet registered. Install directly from GitHub:
+
+```julia
+using Pkg
+Pkg.add(url="https://github.com/VaneBlien/CoFilter.jl")
+```
+
+Or clone and load via local path:
 
 ```julia
 using Pkg
 Pkg.develop(path="path/to/CoFilter.jl")
 ```
 
-### 基础使用
+### Basic Usage
 
 ```julia
 using CoFilter, SparseArrays
 
-# 1. 准备数据
+# 1. Prepare data: 100 users, 200 items, 5% density
 n_users, n_items = 100, 200
 matrix = sprand(n_users, n_items, 0.05)
 direct_rel = DirectRelation(matrix, collect(1:n_users), collect(1:n_items), :rating)
 
-# 2. 配置系统（基于物品的协同过滤）
+# 2. Configure an item-based CF system
 builder = ItemSimilarityBuilder(CosineSimilarity(), TopKNeighbors(30))
 sys = RecommendationSystem(direct_rel, Dict(:item_sim => builder), ItemBasedRecommender())
 
-# 3. 训练
+# 3. Train
 train!(sys)
 
-# 4. 推荐
+# 4. Get top-10 recommendations for user 1
 top10 = recommend(sys, 1, 10)
-println("为用户 1 推荐: $top10")
+println("Recommendations for user 1: $top10")
 ```
 
-### 离线评估
+### Offline Evaluation
 
 ```julia
-# 划分训练/测试集
+# Split data
 train_rel, test_pairs = train_test_split(direct_rel, 0.2)
 
-# 评估
+# Evaluate with a factory closure
 metrics = evaluate(() -> begin
     sys = RecommendationSystem(train_rel, Dict(:item_sim => builder), engine)
     train!(sys)
     return sys
 end, test_pairs, 10)
+
+println("Precision@10: $(metrics.precision)")
+println("Recall@10:    $(metrics.recall)")
+println("NDCG@10:      $(metrics.ndcg)")
 ```
 
-### MovieLens 示例
+### MovieLens Demo
+
+A full end-to-end example on the built-in MovieLens 100K dataset:
 
 ```julia
 include("examples/movielens_demo.jl")
 ```
 
-## 支持的算法
+## Supported Algorithms
 
-| 类别 | 算法 | 类型 |
-|------|------|------|
-| 协同过滤 | User-Based CF | `UserBasedRecommender` |
-| 协同过滤 | Item-Based CF | `ItemBasedRecommender` |
-| 混合 | 加权融合 | `HybridRecommender` + `WeightedSum` |
-| 混合 | 轮询融合 | `HybridRecommender` + `RoundRobin` |
+| Category | Algorithm | Type |
+|----------|-----------|------|
+| Collaborative Filtering | User-Based CF | `UserBasedRecommender` |
+| Collaborative Filtering | Item-Based CF | `ItemBasedRecommender` |
+| Hybrid | Weighted Fusion | `HybridRecommender` + `WeightedSum` |
+| Hybrid | Round-Robin Fusion | `HybridRecommender` + `RoundRobin` |
 
-## 相似度度量
+## Similarity Metrics
 
-- `CosineSimilarity` — 余弦相似度
-- `PearsonSimilarity` — 皮尔逊相关系数
-- `JaccardSimilarity` — Jaccard 系数
-- `AdjustedCosineSimilarity` — 带阻尼的调整余弦相似度
+- `CosineSimilarity` — Cosine similarity
+- `PearsonSimilarity` — Pearson correlation coefficient
+- `JaccardSimilarity` — Jaccard index
+- `AdjustedCosineSimilarity` — Adjusted cosine with configurable damping
 
-## 裁剪策略
+## Pruning Strategies
 
-- `TopKNeighbors(k)` — 保留 K 个最近邻
-- `MinSimilarityThreshold(t)` — 保留相似度 ≥ t 的近邻
+- `TopKNeighbors(k)` — Keep only the `k` nearest neighbors
+- `MinSimilarityThreshold(t)` — Keep neighbors with similarity ≥ `t`
 
-## 评估指标
+## Evaluation Metrics
 
 - Precision@K
 - Recall@K
 - NDCG@K
 - Hit Rate@K
 
-## 项目结构
+## Testing
 
-```
-src/
-├── CoFilter.jl              # 模块入口
-├── core/                    # 核心类型与抽象
-│   ├── interfaces.jl
-│   ├── types.jl
-│   └── relations.jl
-├── similarity/              # 相似度计算
-│   ├── metrics.jl
-│   ├── pruning.jl
-│   ├── computation.jl
-│   ├── builders.jl
-│   └── distributed.jl
-├── recommenders/            # 推荐引擎
-│   ├── base.jl
-│   ├── user_based.jl
-│   ├── item_based.jl
-│   ├── fusion.jl
-│   └── hybrid.jl
-├── graph/                   # 相似度图
-│   ├── similarity_graph.jl
-│   └── cache.jl
-├── system/                  # 系统组装
-│   ├── recommendation_system.jl
-│   ├── training.jl
-│   └── update.jl
-├── evaluation/              # 评估
-│   ├── splitting.jl
-│   ├── metrics.jl
-│   └── cross_validation.jl
-└── utils/                   # 工具
-    ├── sparse_utils.jl
-    ├── cold_start.jl
-    └── validation.jl
-```
-
-## 测试
+Run the full test suite (225 tests across all modules):
 
 ```julia
 using Pkg
 Pkg.test("CoFilter")
 ```
 
-## 许可
+## Roadmap
 
-MIT License
+See [ROADMAP.md](ROADMAP.md) for planned algorithm extensions, performance optimizations, and engineering improvements.
 
+## License
 
-
-
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.

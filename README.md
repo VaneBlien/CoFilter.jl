@@ -1,5 +1,7 @@
 
 # CoFilter.jl
+[中文文档](readme_cn.md)
+
 
 **A flexible, high-performance collaborative filtering module in pure Julia, built on multiple dispatch and a relational modular architecture.**
 

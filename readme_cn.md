@@ -1,170 +1,83 @@
 
 # CoFilter.jl
 
-**CoFilter** 是一个纯 Julia 实现的协同过滤推荐算法模块，基于**多重分派**和**关系模块化**架构设计。
+[English](README.md)
 
-## 特性
+**纯 Julia 协同过滤，围绕稀疏矩阵和多重分派构建。**
 
-- **关系抽象**：用户-物品交互、相似度图统一为“关系”类型
-- **算法即类型**：每种相似度度量和推荐策略都是具体类型
-- **多重分派驱动**：零运行时开销的策略选择
-- **高性能**：直接操作稀疏矩阵，利用 BLAS3 矩阵乘法加速
-- **增量更新**：支持新交互数据的热更新，无需全量重训练
-- **离线评估**：内置 Precision、Recall、NDCG、Hit Rate 全套指标
+## 做了什么
 
-## 架构
+给定用户-物品交互矩阵，CoFilter 构建相似度图并输出 Top-N 推荐。支持 User-Based CF、Item-Based CF、Hybrid 融合——共享同一套稀疏矩阵基础设施，无 Python 依赖。
 
-```
-数据层 (Relations) → 计算层 (Builders) → 策略层 (Recommenders) → Top-N 推荐
-```
+## 设计选择
 
-模块采用清晰的分层结构，将关注点分离并最大化可扩展性：
-
-```
-src/
-├── CoFilter.jl                  # 模块入口
-├── core/                        # 核心类型与抽象
-│   ├── interfaces.jl
-│   ├── types.jl
-│   └── relations.jl
-├── similarity/                  # 相似度计算
-│   ├── metrics.jl               #   Cosine, Pearson, Jaccard, AdjustedCosine
-│   ├── pruning.jl               #   TopK, MinSimilarityThreshold 剪枝策略
-│   ├── computation.jl           #   核心计算内核
-│   ├── builders.jl              #   构建器模式组装计算管线
-│   └── distributed.jl           #   多工作进程分布式计算
-├── recommenders/                # 推荐引擎
-│   ├── base.jl
-│   ├── user_based.jl
-│   ├── item_based.jl
-│   ├── fusion.jl                #   WeightedSum & RoundRobin 融合策略
-│   └── hybrid.jl
-├── graph/                       # 相似度图表示
-│   ├── similarity_graph.jl
-│   └── cache.jl                 #   透明近邻缓存
-├── system/                      # 系统组装与生命周期
-│   ├── recommendation_system.jl
-│   ├── training.jl              #   全量训练
-│   └── update.jl                #   增量在线更新
-├── evaluation/                  # 离线评估套件
-│   ├── splitting.jl             #   训练/测试集划分
-│   ├── metrics.jl               #   Precision, Recall, NDCG, Hit Rate
-│   └── cross_validation.jl
-└── utils/                       # 工具模块
-    ├── sparse_utils.jl
-    ├── cold_start.jl            #   新用户/物品冷启动兜底
-    └── validation.jl
-```
-
-这种模块化设计允许你独立地交换相似度度量、剪枝策略和推荐引擎，或将它们组合成混合推荐系统。
+- **直接操作 `SparseMatrixCSC`**。相似度计算直接对原生稀疏格式调用 BLAS3，不转稠密，不复制。见 `src/similarity/computation.jl`。
+- **算法即具体类型**。`UserBasedRecommender`、`ItemBasedRecommender`、`HybridRecommender` 是不同类型，分派在编译期选择正确路径——没有运行时 `if` 链。
+- **Builder 分离度量与策略**。一个 `Builder` 把相似度度量（Cosine、Pearson、Jaccard、AdjustedCosine）和剪枝策略（TopK、阈值）组合在一起。任何度量都可以和任何剪枝组合，不修改推荐逻辑。见 `src/similarity/builders.jl`。
+- **增量更新只触及受影响行**。新交互不触发全量重算。见 `src/system/update.jl`。
+- **近邻缓存**。`SimilarityGraph` 有可选的 `CachedSimilarityGraph` 变体，首次访问后存储近邻列表。见 `src/graph/cache.jl`。
 
 ## 快速开始
-
-### 安装
-
-该包尚未注册到 Julia 注册表，可通过 GitHub 直接安装：
-
-```julia
-using Pkg
-Pkg.add(url="https://github.com/VaneBlien/CoFilter.jl")
-```
-
-或克隆仓库后通过本地路径加载：
-
-```julia
-using Pkg
-Pkg.develop(path="path/to/CoFilter.jl")
-```
-
-### 基础使用
 
 ```julia
 using CoFilter, SparseArrays
 
-# 1. 准备数据: 100 位用户, 200 个物品, 5% 稠密度
-n_users, n_items = 100, 200
-matrix = sprand(n_users, n_items, 0.05)
-direct_rel = DirectRelation(matrix, collect(1:n_users), collect(1:n_items), :rating)
+# 100 位用户, 200 个物品, 5% 稠密度
+matrix = sprand(100, 200, 0.05)
+direct_rel = DirectRelation(matrix, collect(1:100), collect(1:200), :rating)
 
-# 2. 配置基于物品的协同过滤系统
+# 基于物品的 CF，余弦相似度，保留 30 个近邻
 builder = ItemSimilarityBuilder(CosineSimilarity(), TopKNeighbors(30))
 sys = RecommendationSystem(direct_rel, Dict(:item_sim => builder), ItemBasedRecommender())
 
-# 3. 训练
 train!(sys)
-
-# 4. 为用户 1 推荐 Top-10 物品
 top10 = recommend(sys, 1, 10)
-println("为用户 1 推荐: $top10")
-```
-
-### 离线评估
-
-```julia
-# 划分训练集与测试集
-train_rel, test_pairs = train_test_split(direct_rel, 0.2)
-
-# 使用工厂闭包进行评估
-metrics = evaluate(() -> begin
-    sys = RecommendationSystem(train_rel, Dict(:item_sim => builder), engine)
-    train!(sys)
-    return sys
-end, test_pairs, 10)
-
-println("Precision@10: $(metrics.precision)")
-println("Recall@10:    $(metrics.recall)")
-println("NDCG@10:      $(metrics.ndcg)")
-```
-
-### MovieLens 示例
-
-内置 MovieLens 100K 数据集上的完整端到端示例：
-
-```julia
-include("examples/movielens_demo.jl")
 ```
 
 ## 支持的算法
 
-| 类别 | 算法 | 类型 |
-|------|------|------|
-| 协同过滤 | 基于用户的协同过滤 | `UserBasedRecommender` |
-| 协同过滤 | 基于物品的协同过滤 | `ItemBasedRecommender` |
-| 混合推荐 | 加权融合 | `HybridRecommender` + `WeightedSum` |
-| 混合推荐 | 轮询融合 | `HybridRecommender` + `RoundRobin` |
+| 类型 | 构造器 |
+|------|--------|
+| 基于用户的 CF | `UserBasedRecommender()` |
+| 基于物品的 CF | `ItemBasedRecommender()` |
+| 加权混合 | `HybridRecommender(engines, WeightedSum(weights))` |
+| 轮询混合 | `HybridRecommender(engines, RoundRobin())` |
 
 ## 相似度度量
 
-- `CosineSimilarity` — 余弦相似度
-- `PearsonSimilarity` — 皮尔逊相关系数
-- `JaccardSimilarity` — Jaccard 系数
-- `AdjustedCosineSimilarity` — 带阻尼的调整余弦相似度
+`CosineSimilarity()`、`PearsonSimilarity()`、`JaccardSimilarity()`、`AdjustedCosineSimilarity(damping_factor)`
 
 ## 剪枝策略
 
-- `TopKNeighbors(k)` — 仅保留 K 个最近邻
-- `MinSimilarityThreshold(t)` — 保留相似度 ≥ t 的近邻
+`TopKNeighbors(k)`、`MinSimilarityThreshold(t)`
 
 ## 评估指标
 
-- Precision@K
-- Recall@K
-- NDCG@K
-- Hit Rate@K
+Precision@K、Recall@K、NDCG@K、Hit Rate@K —— 见 `src/evaluation/metrics.jl`
 
 ## 测试
-
-运行完整测试套件（覆盖所有模块的 225 项测试）：
 
 ```julia
 using Pkg
 Pkg.test("CoFilter")
 ```
 
-## 路线图
+覆盖所有模块，225 项测试。
 
-参见 [ROADMAP.md](ROADMAP.md) 了解计划中的算法扩展、性能优化和工程改进。
+## 源码结构
+
+```
+src/
+├── CoFilter.jl
+├── core/           # AbstractRelation, DirectRelation, 接口
+├── similarity/     # 度量, 剪枝, 计算, 构建器, 分布式
+├── recommenders/   # 基于用户, 基于物品, 混合, 融合策略
+├── graph/          # SimilarityGraph, CachedSimilarityGraph
+├── system/         # RecommendationSystem, 训练, 增量更新
+├── evaluation/     # 训练/测试划分, 指标, 交叉验证
+└── utils/          # 稀疏工具, 冷启动兜底
+```
 
 ## 许可
 
-本项目基于 MIT 许可证开源 — 详见 [LICENSE](LICENSE) 文件。
+MIT
